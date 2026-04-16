@@ -4386,7 +4386,7 @@ view.HistogramView = class extends view.Expander {
         ctx.fillStyle = colors.bg;
         ctx.fillRect(0, 0, width, height);
 
-        const { counts, min, max, mean, std, total } = histogram;
+        const { counts, min, max, mean, std, kurtosis, total } = histogram;
         let maxCount = 0;
         for (const count of counts) {
             if (count > maxCount) maxCount = count;
@@ -4433,7 +4433,7 @@ view.HistogramView = class extends view.Expander {
         ctx.fillStyle = colors.text;
         ctx.font = '10px -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif';
         ctx.textAlign = 'center';
-        ctx.fillText(`n=${total.toLocaleString()}  \u03c3=${std.toPrecision(3)}`, width / 2, padding.top + chartHeight + 28);
+        ctx.fillText(`n=${total.toLocaleString()}  \u03c3=${std.toPrecision(3)}  \u03ba=${kurtosis.toFixed(2)}`, width / 2, padding.top + chartHeight + 28);
     }
 };
 
@@ -6753,21 +6753,26 @@ metrics.Tensor = class {
                     const counts = new Array(numBins).fill(0);
                     const range = max - min;
                     let variance = 0;
+                    let m4 = 0;
                     if (range === 0) {
                         counts[0] = values.length;
                     } else {
                         for (const v of values) {
                             const bin = Math.min(Math.floor((v - min) / range * numBins), numBins - 1);
                             counts[bin]++;
-                            variance += (v - mean) * (v - mean);
+                            const diff = v - mean;
+                            const diff2 = diff * diff;
+                            variance += diff2;
+                            m4 += diff2 * diff2;
                         }
                     }
                     const std = Math.sqrt(variance / values.length);
+                    const kurtosis = std > 0 ? (m4 / values.length) / (variance / values.length * (variance / values.length)) : 0;
                     const edges = new Array(numBins + 1);
                     for (let i = 0; i <= numBins; i++) {
                         edges[i] = min + (range * i) / numBins;
                     }
-                    this._histogram = { counts, edges, min, max, mean, std, total: values.length };
+                    this._histogram = { counts, edges, min, max, mean, std, kurtosis, total: values.length };
                 }
             }
         }
