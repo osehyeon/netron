@@ -4448,7 +4448,8 @@ view.ChannelHistogramView = class extends view.Expander {
     constructor(context, tensor) {
         super(context);
         this._tensor = tensor;
-        this._axis = 0;
+        this._axes = [0];
+        this._kurtosisThreshold = 4;
         this.expandable();
         const line = this.createElement('div', 'sidebar-item-value-line');
         line.innerHTML = '<span class="sidebar-item-value-line-content">Per-Channel Distribution</span>';
@@ -4468,45 +4469,102 @@ view.ChannelHistogramView = class extends view.Expander {
             this.element.appendChild(container);
             return;
         }
-        // Axis selector
+        // Axis checkboxes
         const axisRow = this.createElement('div');
-        axisRow.style.cssText = 'display: flex; gap: 6px; align-items: center; padding: 0 6px 6px; font-size: 11px;';
+        axisRow.style.cssText = 'display: flex; gap: 8px; align-items: center; padding: 0 6px 4px; font-size: 11px; flex-wrap: wrap;';
         const axisLabel = this.createElement('span');
-        axisLabel.textContent = 'axis:';
+        axisLabel.textContent = 'axes:';
         axisRow.appendChild(axisLabel);
-        const axisSelect = this.createElement('select');
-        axisSelect.style.cssText = 'font-size: 11px; padding: 1px 4px; border: 1px solid #ccc; border-radius: 3px; background: transparent; color: inherit;';
+        const checkboxes = [];
         for (let i = 0; i < shape.length; i++) {
             const dim = typeof shape[i] === 'bigint' ? Number(shape[i]) : shape[i];
-            const opt = this.createElement('option');
-            opt.value = String(i);
-            opt.textContent = `${i} (${dim})`;
-            axisSelect.appendChild(opt);
+            const wrap = this.createElement('label');
+            wrap.style.cssText = 'display: flex; align-items: center; gap: 2px; cursor: pointer; font-size: 11px;';
+            const cb = this.createElement('input');
+            cb.type = 'checkbox';
+            cb.checked = i === 0;
+            cb.value = String(i);
+            cb.style.cssText = 'margin: 0;';
+            wrap.appendChild(cb);
+            const text = this.createElement('span');
+            text.textContent = `${i} (${dim})`;
+            wrap.appendChild(text);
+            axisRow.appendChild(wrap);
+            checkboxes.push(cb);
         }
-        axisRow.appendChild(axisSelect);
         container.appendChild(axisRow);
+        // Info line
+        const infoLine = this.createElement('div');
+        infoLine.style.cssText = 'font-size: 10px; color: #999; padding: 0 6px 6px;';
+        container.appendChild(infoLine);
+        // Kurtosis threshold
+        const threshRow = this.createElement('div');
+        threshRow.style.cssText = 'display: flex; gap: 6px; align-items: center; padding: 0 6px 6px; font-size: 11px;';
+        const threshLabel = this.createElement('span');
+        threshLabel.textContent = '\u03ba warn:';
+        threshRow.appendChild(threshLabel);
+        const threshInput = this.createElement('input');
+        threshInput.type = 'number';
+        threshInput.value = '4';
+        threshInput.step = '0.5';
+        threshInput.min = '0';
+        threshInput.style.cssText = 'width: 50px; font-size: 11px; padding: 1px 4px; border: 1px solid #ccc; border-radius: 3px; background: transparent; color: inherit;';
+        threshRow.appendChild(threshInput);
+        container.appendChild(threshRow);
         // Channel list area
         const listArea = this.createElement('div');
         container.appendChild(listArea);
         this.element.appendChild(container);
         // Render
         const self = this;
+        const dims = shape.map((d) => typeof d === 'bigint' ? Number(d) : d);
+        const updateInfo = () => {
+            const axes = self._axes;
+            let numGroups = 1;
+            let groupSize = 1;
+            for (let i = 0; i < dims.length; i++) {
+                if (axes.indexOf(i) >= 0) {
+                    numGroups *= dims[i];
+                } else {
+                    groupSize *= dims[i];
+                }
+            }
+            infoLine.textContent = `${numGroups} groups \u00d7 ${groupSize} values each`;
+        };
         const renderChannels = () => {
             while (listArea.firstChild) {
                 listArea.removeChild(listArea.firstChild);
             }
+            updateInfo();
             self._renderChannels(listArea);
         };
-        axisSelect.addEventListener('change', () => {
-            self._axis = parseInt(axisSelect.value, 10);
-            renderChannels();
+        for (let i = 0; i < checkboxes.length; i++) {
+            checkboxes[i].addEventListener('change', () => {
+                const selected = [];
+                for (let j = 0; j < checkboxes.length; j++) {
+                    if (checkboxes[j].checked) selected.push(j);
+                }
+                if (selected.length === 0) {
+                    checkboxes[i].checked = true;
+                    return;
+                }
+                self._axes = selected;
+                renderChannels();
+            });
+        }
+        threshInput.addEventListener('change', () => {
+            const val = parseFloat(threshInput.value);
+            if (!isNaN(val) && val >= 0) {
+                self._kurtosisThreshold = val;
+                renderChannels();
+            }
         });
         window.requestAnimationFrame(renderChannels);
     }
 
     _renderChannels(listArea) {
         const tensor = new metrics.Tensor(this._tensor);
-        const channels = tensor.channelHistograms(this._axis);
+        const channels = tensor.channelHistograms(this._axes);
         if (!channels || channels.length === 0) {
             const msg = this.createElement('div');
             msg.style.cssText = 'font-size: 11px; color: #999; padding: 4px 8px;';
@@ -4537,21 +4595,48 @@ view.ChannelHistogramView = class extends view.Expander {
         const scroll = this.createElement('div');
         scroll.style.cssText = `max-height: ${totalHeight}px; overflow-y: auto; border-top: 1px solid ${colors.axis};`;
         listArea.appendChild(scroll);
+        // Compute multi-axis index labels
+        const type = this._tensor.type;
+        const shape = type && type.shape ? type.shape.dimensions : [];
+        const axisDims = this._axes.map((a) => typeof shape[a] === 'bigint' ? Number(shape[a]) : shape[a]);
+        const multiAxis = this._axes.length > 1;
+        const labelWidth = multiAxis ? 70 : 45;
         for (let ch = 0; ch < displayCount; ch++) {
             const hist = channels[ch];
-            const isWarn = hist.kurtosis > 4;
+            const isWarn = hist.kurtosis > this._kurtosisThreshold;
             const row = this.createElement('div');
             row.style.cssText = `display: flex; align-items: center; height: ${rowHeight}px; padding: 0 6px; font-size: 10px; background: ${ch % 2 === 0 ? colors.bg : colors.bgAlt};`;
             const label = this.createElement('span');
-            label.style.cssText = `width: 45px; flex-shrink: 0; color: ${isWarn ? colors.barWarn : colors.text};`;
-            label.textContent = `ch ${ch}${isWarn ? ' \u26a0' : ''}`;
+            label.style.cssText = `width: ${labelWidth}px; flex-shrink: 0; color: ${isWarn ? colors.barWarn : colors.text};`;
+            let labelText = '';
+            if (multiAxis) {
+                const indices = [];
+                let remaining = ch;
+                for (let a = axisDims.length - 1; a >= 0; a--) {
+                    indices.unshift(remaining % axisDims[a]);
+                    remaining = Math.floor(remaining / axisDims[a]);
+                }
+                labelText = indices.join(',');
+            } else {
+                labelText = `ch ${ch}`;
+            }
+            if (isWarn) labelText += ' \u26a0';
+            label.textContent = labelText;
             row.appendChild(label);
             const miniCanvas = this.createElement('canvas');
             miniCanvas.style.cssText = 'flex: 1; height: 20px;';
             miniCanvas.height = 20;
             row.appendChild(miniCanvas);
+            const minVal = this.createElement('span');
+            minVal.style.cssText = `width: 55px; flex-shrink: 0; text-align: right; color: ${colors.text}; font-size: 9px;`;
+            minVal.textContent = hist.min.toPrecision(3);
+            row.appendChild(minVal);
+            const maxVal = this.createElement('span');
+            maxVal.style.cssText = `width: 55px; flex-shrink: 0; text-align: right; color: ${colors.text}; font-size: 9px;`;
+            maxVal.textContent = hist.max.toPrecision(3);
+            row.appendChild(maxVal);
             const kVal = this.createElement('span');
-            kVal.style.cssText = `width: 55px; flex-shrink: 0; text-align: right; color: ${isWarn ? colors.barWarn : colors.text};`;
+            kVal.style.cssText = `width: 50px; flex-shrink: 0; text-align: right; color: ${isWarn ? colors.barWarn : colors.text};`;
             kVal.textContent = `\u03ba=${hist.kurtosis.toFixed(1)}`;
             row.appendChild(kVal);
             scroll.appendChild(row);
@@ -6947,16 +7032,20 @@ metrics.Tensor = class {
         return this._histogram;
     }
 
-    channelHistograms(axis) {
-        const key = `_ch_${axis}`;
+    channelHistograms(axes) {
+        if (!Array.isArray(axes)) axes = [axes];
+        const key = `_ch_${axes.join('_')}`;
         if (this[key] !== undefined) {
             return this[key];
         }
         this[key] = null;
         const type = this._tensor.type;
         const shape = type && type.shape ? type.shape.dimensions : null;
-        if (!shape || !Array.isArray(shape) || shape.length < 2 || axis < 0 || axis >= shape.length) {
+        if (!shape || !Array.isArray(shape) || shape.length < 2) {
             return null;
+        }
+        for (let i = 0; i < axes.length; i++) {
+            if (axes[i] < 0 || axes[i] >= shape.length) return null;
         }
         const dims = shape.map((d) => typeof d === 'bigint' ? Number(d) : d);
         let totalSize = 1;
@@ -6964,6 +7053,26 @@ metrics.Tensor = class {
         if (totalSize >= 0x800000 || (!type.dataType.startsWith('float') && !type.dataType.startsWith('bfloat'))) {
             return null;
         }
+        // Compute number of groups and strides
+        const sortedAxes = axes.slice().sort((a, b) => a - b);
+        let numGroups = 1;
+        for (let i = 0; i < sortedAxes.length; i++) numGroups *= dims[sortedAxes[i]];
+        // Compute stride for each dimension
+        const strides = new Array(dims.length);
+        strides[dims.length - 1] = 1;
+        for (let i = dims.length - 2; i >= 0; i--) {
+            strides[i] = strides[i + 1] * dims[i + 1];
+        }
+        // Compute group strides (for mapping flat index → group index)
+        const axisDims = sortedAxes.map((a) => dims[a]);
+        const axisStrides = new Array(sortedAxes.length);
+        if (sortedAxes.length > 0) {
+            axisStrides[sortedAxes.length - 1] = 1;
+            for (let i = sortedAxes.length - 2; i >= 0; i--) {
+                axisStrides[i] = axisStrides[i + 1] * axisDims[i + 1];
+            }
+        }
+        // Flatten tensor
         const data = this._tensor.value;
         const flat = [];
         const stack = [data];
@@ -6979,21 +7088,25 @@ metrics.Tensor = class {
                 flat.push(null);
             }
         }
-        const numChannels = dims[axis];
-        let innerSize = 1;
-        for (let i = axis + 1; i < dims.length; i++) innerSize *= dims[i];
-        const sliceSize = numChannels * innerSize;
-        const channelValues = new Array(numChannels);
-        for (let i = 0; i < numChannels; i++) channelValues[i] = [];
+        // Assign values to groups
+        const groupValues = new Array(numGroups);
+        for (let i = 0; i < numGroups; i++) groupValues[i] = [];
         for (let i = 0; i < flat.length; i++) {
             if (flat[i] === null) continue;
-            const ch = Math.floor((i % sliceSize) / innerSize) % numChannels;
-            channelValues[ch].push(flat[i]);
+            // Compute multi-dimensional index from flat index
+            let groupIdx = 0;
+            let remaining = i;
+            for (let a = 0; a < sortedAxes.length; a++) {
+                const dimIdx = Math.floor(remaining / strides[sortedAxes[a]]) % dims[sortedAxes[a]];
+                groupIdx += dimIdx * axisStrides[a];
+            }
+            groupValues[groupIdx].push(flat[i]);
         }
+        // Compute histogram per group
         const numBins = 32;
         const results = [];
-        for (let c = 0; c < numChannels; c++) {
-            const values = channelValues[c];
+        for (let g = 0; g < numGroups; g++) {
+            const values = groupValues[g];
             if (values.length === 0) {
                 results.push({ counts: new Array(numBins).fill(0), min: 0, max: 0, mean: 0, std: 0, kurtosis: 0, total: 0 });
                 continue;
