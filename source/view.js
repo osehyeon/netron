@@ -4332,6 +4332,111 @@ view.TensorView = class extends view.Expander {
     }
 };
 
+view.HistogramView = class extends view.Expander {
+
+    constructor(context, tensor) {
+        super(context);
+        this._tensor = tensor;
+        this.expandable();
+        const line = this.createElement('div', 'sidebar-item-value-line');
+        line.innerHTML = '<span class="sidebar-item-value-line-content">Weight Distribution</span>';
+        this.element.appendChild(line);
+    }
+
+    expand() {
+        const container = this.createElement('div', 'sidebar-item-value-line-border');
+        const canvas = this.createElement('canvas');
+        canvas.width = 720;
+        canvas.height = 400;
+        canvas.style.width = '100%';
+        canvas.style.height = '200px';
+        container.appendChild(canvas);
+        this.element.appendChild(container);
+        window.requestAnimationFrame(() => this._draw(canvas));
+    }
+
+    _draw(canvas) {
+        const tensor = new metrics.Tensor(this._tensor);
+        const histogram = tensor.histogram;
+        if (!histogram) {
+            return;
+        }
+
+        const ctx = canvas.getContext('2d');
+        const dpr = window.devicePixelRatio || 1;
+        canvas.width = canvas.offsetWidth * dpr;
+        canvas.height = 200 * dpr;
+        ctx.scale(dpr, dpr);
+
+        const width = canvas.offsetWidth;
+        const height = 200;
+        const padding = { top: 15, right: 15, bottom: 35, left: 15 };
+        const chartWidth = width - padding.left - padding.right;
+        const chartHeight = height - padding.top - padding.bottom;
+
+        const isDark = window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches;
+        const colors = {
+            bar: isDark ? '#5a9fd9' : '#4a90d9',
+            text: isDark ? '#ccc' : '#555',
+            axis: isDark ? '#555' : '#ddd',
+            mean: '#e74c3c',
+            bg: isDark ? '#2d2d2d' : '#ffffff'
+        };
+
+        ctx.fillStyle = colors.bg;
+        ctx.fillRect(0, 0, width, height);
+
+        const { counts, min, max, mean, std, total } = histogram;
+        let maxCount = 0;
+        for (const count of counts) {
+            if (count > maxCount) maxCount = count;
+        }
+
+        const barWidth = chartWidth / counts.length;
+        for (let i = 0; i < counts.length; i++) {
+            const barHeight = maxCount > 0 ? (counts[i] / maxCount) * chartHeight : 0;
+            const x = padding.left + i * barWidth;
+            const y = padding.top + chartHeight - barHeight;
+            ctx.fillStyle = colors.bar;
+            ctx.fillRect(x, y, barWidth - 1, barHeight);
+        }
+
+        ctx.strokeStyle = colors.axis;
+        ctx.beginPath();
+        ctx.moveTo(padding.left, padding.top + chartHeight);
+        ctx.lineTo(padding.left + chartWidth, padding.top + chartHeight);
+        ctx.stroke();
+
+        if (max > min) {
+            const meanX = padding.left + ((mean - min) / (max - min)) * chartWidth;
+            ctx.strokeStyle = colors.mean;
+            ctx.setLineDash([4, 3]);
+            ctx.beginPath();
+            ctx.moveTo(meanX, padding.top);
+            ctx.lineTo(meanX, padding.top + chartHeight);
+            ctx.stroke();
+            ctx.setLineDash([]);
+
+            ctx.fillStyle = colors.mean;
+            ctx.font = '10px -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif';
+            ctx.textAlign = 'center';
+            ctx.fillText(`\u03bc=${mean.toPrecision(3)}`, meanX, padding.top - 3);
+        }
+
+        ctx.fillStyle = colors.text;
+        ctx.font = '10px -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif';
+        ctx.textAlign = 'left';
+        ctx.fillText(min.toPrecision(3), padding.left, padding.top + chartHeight + 14);
+        ctx.textAlign = 'right';
+        ctx.fillText(max.toPrecision(3), padding.left + chartWidth, padding.top + chartHeight + 14);
+
+        ctx.fillStyle = colors.text;
+        ctx.font = '10px -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif';
+        ctx.textAlign = 'center';
+        ctx.fillText(`n=${total.toLocaleString()}  \u03c3=${std.toPrecision(3)}`, width / 2, padding.top + chartHeight + 28);
+    }
+};
+
 view.NodeView = class extends view.Expander {
 
     constructor(context, node) {
@@ -4566,6 +4671,9 @@ view.TensorSidebar = class extends view.ObjectSidebar {
                             this.addArgument(metric.name, argument, 'attribute');
                         }
                     }
+                    this.addSection('Distribution');
+                    const histogramView = new view.HistogramView(this._view, this._tensor);
+                    this.addEntry('histogram', histogramView);
                 }
             });
         }
@@ -6606,6 +6714,64 @@ metrics.Tensor = class {
             }
         }
         return this._metrics;
+    }
+
+    get histogram() {
+        if (this._histogram === undefined) {
+            this._histogram = null;
+            const type = this._tensor.type;
+            const shape = type && type.shape ? type.shape.dimensions : null;
+            if (!shape || !Array.isArray(shape) || shape.length === 0) {
+                return this._histogram;
+            }
+            const size = shape.reduce((a, b) => BigInt(a) * BigInt(b), 1n).toNumber();
+            if (size < 0x800000 && (type.dataType.startsWith('float') || type.dataType.startsWith('bfloat'))) {
+                const data = this._tensor.value;
+                const values = [];
+                const stack = [data];
+                while (stack.length > 0) {
+                    const item = stack.pop();
+                    if (Array.isArray(item)) {
+                        for (const element of item) {
+                            stack.push(element);
+                        }
+                    } else if (typeof item === 'number' && isFinite(item)) {
+                        values.push(item);
+                    }
+                }
+                if (values.length > 0) {
+                    const numBins = 64;
+                    let min = values[0];
+                    let max = values[0];
+                    let sum = 0;
+                    for (const v of values) {
+                        if (v < min) min = v;
+                        if (v > max) max = v;
+                        sum += v;
+                    }
+                    const mean = sum / values.length;
+                    const counts = new Array(numBins).fill(0);
+                    const range = max - min;
+                    let variance = 0;
+                    if (range === 0) {
+                        counts[0] = values.length;
+                    } else {
+                        for (const v of values) {
+                            const bin = Math.min(Math.floor((v - min) / range * numBins), numBins - 1);
+                            counts[bin]++;
+                            variance += (v - mean) * (v - mean);
+                        }
+                    }
+                    const std = Math.sqrt(variance / values.length);
+                    const edges = new Array(numBins + 1);
+                    for (let i = 0; i <= numBins; i++) {
+                        edges[i] = min + (range * i) / numBins;
+                    }
+                    this._histogram = { counts, edges, min, max, mean, std, total: values.length };
+                }
+            }
+        }
+        return this._histogram;
     }
 };
 
