@@ -4337,8 +4337,6 @@ view.HistogramView = class extends view.Expander {
     constructor(context, tensor) {
         super(context);
         this._tensor = tensor;
-        this._mode = 'per-tensor';
-        this._axis = 0;
         this.expandable();
         const line = this.createElement('div', 'sidebar-item-value-line');
         line.innerHTML = '<span class="sidebar-item-value-line-content">Weight Distribution</span>';
@@ -4346,115 +4344,54 @@ view.HistogramView = class extends view.Expander {
     }
 
     expand() {
-        this._container = this.createElement('div', 'sidebar-item-value-line-border');
-        this._container.style.padding = '8px 0';
-        // Controls
-        const controls = this.createElement('div');
-        controls.style.cssText = 'display: flex; gap: 8px; align-items: center; padding: 0 6px 8px; font-size: 11px;';
-        const modeSelect = this.createElement('select');
-        modeSelect.style.cssText = 'font-size: 11px; padding: 1px 4px; border: 1px solid #ccc; border-radius: 3px; background: transparent; color: inherit;';
-        const optTensor = this.createElement('option');
-        optTensor.value = 'per-tensor';
-        optTensor.textContent = 'Per-Tensor';
-        const optChannel = this.createElement('option');
-        optChannel.value = 'per-channel';
-        optChannel.textContent = 'Per-Channel';
-        modeSelect.appendChild(optTensor);
-        modeSelect.appendChild(optChannel);
-        controls.appendChild(modeSelect);
-        // Axis selector (hidden initially)
-        this._axisLabel = this.createElement('span');
-        this._axisLabel.textContent = 'axis:';
-        this._axisLabel.style.display = 'none';
-        controls.appendChild(this._axisLabel);
-        this._axisSelect = this.createElement('select');
-        this._axisSelect.style.cssText = 'font-size: 11px; padding: 1px 4px; border: 1px solid #ccc; border-radius: 3px; background: transparent; color: inherit; display: none;';
-        const type = this._tensor.type;
-        const shape = type && type.shape ? type.shape.dimensions : [];
-        for (let i = 0; i < shape.length; i++) {
-            const opt = this.createElement('option');
-            opt.value = String(i);
-            opt.textContent = `${i} (${shape[i]})`;
-            this._axisSelect.appendChild(opt);
-        }
-        controls.appendChild(this._axisSelect);
-        this._shapeLabel = this.createElement('span');
-        this._shapeLabel.style.cssText = 'color: #999; font-size: 10px; display: none;';
-        controls.appendChild(this._shapeLabel);
-        this._container.appendChild(controls);
-        // Canvas area
-        this._canvasArea = this.createElement('div');
-        this._container.appendChild(this._canvasArea);
-        this.element.appendChild(this._container);
-        // Events
-        modeSelect.addEventListener('change', () => {
-            this._mode = modeSelect.value;
-            const isChannel = this._mode === 'per-channel';
-            this._axisLabel.style.display = isChannel ? '' : 'none';
-            this._axisSelect.style.display = isChannel ? '' : 'none';
-            this._shapeLabel.style.display = isChannel ? '' : 'none';
-            this._render();
-        });
-        this._axisSelect.addEventListener('change', () => {
-            this._axis = parseInt(this._axisSelect.value, 10);
-            this._render();
-        });
-        this._render();
+        const container = this.createElement('div', 'sidebar-item-value-line-border');
+        const canvas = this.createElement('canvas');
+        canvas.width = 720;
+        canvas.height = 400;
+        canvas.style.width = '100%';
+        canvas.style.height = '200px';
+        container.appendChild(canvas);
+        this.element.appendChild(container);
+        window.requestAnimationFrame(() => this._draw(canvas));
     }
 
-    _render() {
-        this._canvasArea.innerHTML = '';
-        if (this._mode === 'per-tensor') {
-            const canvas = this.createElement('canvas');
-            canvas.width = 720;
-            canvas.height = 400;
-            canvas.style.width = '100%';
-            canvas.style.height = '200px';
-            this._canvasArea.appendChild(canvas);
-            window.requestAnimationFrame(() => this._drawTensor(canvas));
-        } else {
-            this._drawChannels();
-        }
-    }
-
-    _colors() {
-        const isDark = window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches;
-        return {
-            bar: isDark ? '#5a9fd9' : '#4a90d9',
-            barWarn: '#e67e22',
-            text: isDark ? '#ccc' : '#555',
-            axis: isDark ? '#555' : '#ddd',
-            mean: '#e74c3c',
-            warn: '#e74c3c',
-            bg: isDark ? '#2d2d2d' : '#ffffff',
-            bgAlt: isDark ? '#333' : '#f8f8f8'
-        };
-    }
-
-    _drawTensor(canvas) {
+    _draw(canvas) {
         const tensor = new metrics.Tensor(this._tensor);
         const histogram = tensor.histogram;
         if (!histogram) {
             return;
         }
+
         const ctx = canvas.getContext('2d');
         const dpr = window.devicePixelRatio || 1;
         canvas.width = canvas.offsetWidth * dpr;
         canvas.height = 200 * dpr;
         ctx.scale(dpr, dpr);
+
         const width = canvas.offsetWidth;
         const height = 200;
         const padding = { top: 15, right: 15, bottom: 35, left: 15 };
         const chartWidth = width - padding.left - padding.right;
         const chartHeight = height - padding.top - padding.bottom;
-        const colors = this._colors();
+
+        const isDark = window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches;
+        const colors = {
+            bar: isDark ? '#5a9fd9' : '#4a90d9',
+            text: isDark ? '#ccc' : '#555',
+            axis: isDark ? '#555' : '#ddd',
+            mean: '#e74c3c',
+            bg: isDark ? '#2d2d2d' : '#ffffff'
+        };
+
         ctx.fillStyle = colors.bg;
         ctx.fillRect(0, 0, width, height);
+
         const { counts, min, max, mean, std, kurtosis, total } = histogram;
         let maxCount = 0;
         for (const count of counts) {
             if (count > maxCount) maxCount = count;
         }
+
         const barWidth = chartWidth / counts.length;
         for (let i = 0; i < counts.length; i++) {
             const barHeight = maxCount > 0 ? (counts[i] / maxCount) * chartHeight : 0;
@@ -4463,11 +4400,13 @@ view.HistogramView = class extends view.Expander {
             ctx.fillStyle = colors.bar;
             ctx.fillRect(x, y, barWidth - 1, barHeight);
         }
+
         ctx.strokeStyle = colors.axis;
         ctx.beginPath();
         ctx.moveTo(padding.left, padding.top + chartHeight);
         ctx.lineTo(padding.left + chartWidth, padding.top + chartHeight);
         ctx.stroke();
+
         if (max > min) {
             const meanX = padding.left + ((mean - min) / (max - min)) * chartWidth;
             ctx.strokeStyle = colors.mean;
@@ -4477,130 +4416,24 @@ view.HistogramView = class extends view.Expander {
             ctx.lineTo(meanX, padding.top + chartHeight);
             ctx.stroke();
             ctx.setLineDash([]);
+
             ctx.fillStyle = colors.mean;
             ctx.font = '10px -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif';
             ctx.textAlign = 'center';
             ctx.fillText(`\u03bc=${mean.toPrecision(3)}`, meanX, padding.top - 3);
         }
+
         ctx.fillStyle = colors.text;
         ctx.font = '10px -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif';
         ctx.textAlign = 'left';
         ctx.fillText(min.toPrecision(3), padding.left, padding.top + chartHeight + 14);
         ctx.textAlign = 'right';
         ctx.fillText(max.toPrecision(3), padding.left + chartWidth, padding.top + chartHeight + 14);
+
         ctx.fillStyle = colors.text;
         ctx.font = '10px -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif';
         ctx.textAlign = 'center';
         ctx.fillText(`n=${total.toLocaleString()}  \u03c3=${std.toPrecision(3)}  \u03ba=${kurtosis.toFixed(2)}`, width / 2, padding.top + chartHeight + 28);
-    }
-
-    _drawChannels() {
-        const tensor = new metrics.Tensor(this._tensor);
-        const channels = tensor.channelHistograms(this._axis);
-        if (!channels || channels.length === 0) {
-            const msg = this.createElement('div');
-            msg.style.cssText = 'font-size: 11px; color: #999; padding: 8px;';
-            msg.textContent = 'Cannot compute per-channel histogram for this tensor.';
-            this._canvasArea.appendChild(msg);
-            return;
-        }
-        const type = this._tensor.type;
-        const shape = type && type.shape ? type.shape.dimensions : [];
-        this._shapeLabel.textContent = `${channels.length} channels`;
-        const colors = this._colors();
-        // Summary stats
-        const kurtValues = channels.map((ch) => ch.kurtosis);
-        let kMin = kurtValues[0];
-        let kMax = kurtValues[0];
-        let kSum = 0;
-        for (const k of kurtValues) {
-            if (k < kMin) kMin = k;
-            if (k > kMax) kMax = k;
-            kSum += k;
-        }
-        const kMean = kSum / kurtValues.length;
-        const summary = this.createElement('div');
-        summary.style.cssText = 'font-size: 10px; color: #999; padding: 2px 6px 6px; line-height: 1.6;';
-        summary.textContent = `\u03ba summary \u2014 min: ${kMin.toFixed(2)}  max: ${kMax.toFixed(2)}  mean: ${kMean.toFixed(2)}`;
-        this._canvasArea.appendChild(summary);
-        // Scrollable container
-        const scroll = this.createElement('div');
-        const maxVisible = 256;
-        const displayCount = Math.min(channels.length, maxVisible);
-        const rowHeight = 28;
-        const totalHeight = Math.min(displayCount * rowHeight, 300);
-        scroll.style.cssText = `max-height: ${totalHeight}px; overflow-y: auto; border-top: 1px solid ${colors.axis};`;
-        this._canvasArea.appendChild(scroll);
-        // Render channel rows
-        for (let ch = 0; ch < displayCount; ch++) {
-            const hist = channels[ch];
-            const row = this.createElement('div');
-            const isWarn = hist.kurtosis > 4;
-            row.style.cssText = `display: flex; align-items: center; height: ${rowHeight}px; padding: 0 6px; font-size: 10px; background: ${ch % 2 === 0 ? colors.bg : colors.bgAlt};`;
-            // Channel label
-            const label = this.createElement('span');
-            label.style.cssText = `width: 45px; flex-shrink: 0; color: ${isWarn ? colors.warn : colors.text};`;
-            label.textContent = `ch ${ch}${isWarn ? ' \u26a0' : ''}`;
-            row.appendChild(label);
-            // Mini canvas
-            const canvas = this.createElement('canvas');
-            canvas.style.cssText = 'flex: 1; height: 20px;';
-            canvas.height = 20;
-            row.appendChild(canvas);
-            // Stats
-            const stats = this.createElement('span');
-            stats.style.cssText = `width: 60px; flex-shrink: 0; text-align: right; color: ${isWarn ? colors.warn : colors.text};`;
-            stats.textContent = `\u03ba=${hist.kurtosis.toFixed(1)}`;
-            row.appendChild(stats);
-            scroll.appendChild(row);
-            // Draw mini histogram
-            window.requestAnimationFrame(() => this._drawMini(canvas, hist, colors, isWarn));
-        }
-        if (channels.length > maxVisible) {
-            const more = this.createElement('div');
-            more.style.cssText = 'font-size: 10px; color: #999; padding: 4px 6px;';
-            more.textContent = `... and ${channels.length - maxVisible} more channels`;
-            this._canvasArea.appendChild(more);
-        }
-    }
-
-    _drawMini(canvas, hist, colors, isWarn) {
-        const dpr = window.devicePixelRatio || 1;
-        const width = canvas.offsetWidth;
-        const height = 20;
-        if (width === 0) {
-            return;
-        }
-        canvas.width = width * dpr;
-        canvas.height = height * dpr;
-        const ctx = canvas.getContext('2d');
-        ctx.scale(dpr, dpr);
-        const { counts, min, max, mean } = hist;
-        let maxCount = 0;
-        for (const count of counts) {
-            if (count > maxCount) maxCount = count;
-        }
-        if (maxCount === 0) {
-            return;
-        }
-        const barWidth = width / counts.length;
-        ctx.fillStyle = isWarn ? colors.barWarn : colors.bar;
-        for (let i = 0; i < counts.length; i++) {
-            const barHeight = (counts[i] / maxCount) * height;
-            ctx.fillRect(i * barWidth, height - barHeight, barWidth - 0.5, barHeight);
-        }
-        // Mean line
-        if (max > min) {
-            const meanX = ((mean - min) / (max - min)) * width;
-            ctx.strokeStyle = colors.mean;
-            ctx.lineWidth = 1;
-            ctx.setLineDash([2, 2]);
-            ctx.beginPath();
-            ctx.moveTo(meanX, 0);
-            ctx.lineTo(meanX, height);
-            ctx.stroke();
-            ctx.setLineDash([]);
-        }
     }
 };
 
@@ -6944,109 +6777,6 @@ metrics.Tensor = class {
             }
         }
         return this._histogram;
-    }
-
-    channelHistograms(axis) {
-        const key = `_channelHistograms_${axis}`;
-        if (this[key] !== undefined) {
-            return this[key];
-        }
-        this[key] = null;
-        const type = this._tensor.type;
-        const shape = type && type.shape ? type.shape.dimensions : null;
-        if (!shape || !Array.isArray(shape) || shape.length < 2) {
-            return this[key];
-        }
-        if (axis < 0 || axis >= shape.length) {
-            return this[key];
-        }
-        const size = shape.reduce((a, b) => BigInt(a) * BigInt(b), 1n).toNumber();
-        if (size >= 0x800000 || !(type.dataType.startsWith('float') || type.dataType.startsWith('bfloat'))) {
-            return this[key];
-        }
-        const data = this._tensor.value;
-        const numChannels = typeof shape[axis] === 'bigint' ? Number(shape[axis]) : shape[axis];
-        // Flatten per-channel slices from nested array
-        const channelValues = new Array(numChannels);
-        for (let i = 0; i < numChannels; i++) {
-            channelValues[i] = [];
-        }
-        // Compute strides for the given axis
-        const dims = shape.map((d) => typeof d === 'bigint' ? Number(d) : d);
-        let outerSize = 1;
-        for (let i = 0; i < axis; i++) {
-            outerSize *= dims[i];
-        }
-        let innerSize = 1;
-        for (let i = axis + 1; i < dims.length; i++) {
-            innerSize *= dims[i];
-        }
-        // Flatten entire tensor first
-        const flat = [];
-        const stack = [data];
-        while (stack.length > 0) {
-            const item = stack.pop();
-            if (Array.isArray(item)) {
-                for (let i = item.length - 1; i >= 0; i--) {
-                    stack.push(item[i]);
-                }
-            } else if (typeof item === 'number' && isFinite(item)) {
-                flat.push(item);
-            } else {
-                flat.push(null);
-            }
-        }
-        // Assign to channels based on stride
-        const channelStride = innerSize;
-        const sliceSize = numChannels * innerSize;
-        for (let i = 0; i < flat.length; i++) {
-            if (flat[i] === null) {
-                continue;
-            }
-            const posInSlice = i % sliceSize;
-            const ch = Math.floor(posInSlice / channelStride) % numChannels;
-            channelValues[ch].push(flat[i]);
-        }
-        // Compute histogram per channel
-        const numBins = 32;
-        const results = [];
-        for (let ch = 0; ch < numChannels; ch++) {
-            const values = channelValues[ch];
-            if (values.length === 0) {
-                results.push({ counts: new Array(numBins).fill(0), min: 0, max: 0, mean: 0, std: 0, kurtosis: 0, total: 0 });
-                continue;
-            }
-            let min = values[0];
-            let max = values[0];
-            let sum = 0;
-            for (const v of values) {
-                if (v < min) min = v;
-                if (v > max) max = v;
-                sum += v;
-            }
-            const mean = sum / values.length;
-            const counts = new Array(numBins).fill(0);
-            const range = max - min;
-            let variance = 0;
-            let m4 = 0;
-            if (range === 0) {
-                counts[0] = values.length;
-            } else {
-                for (const v of values) {
-                    const bin = Math.min(Math.floor((v - min) / range * numBins), numBins - 1);
-                    counts[bin]++;
-                    const diff = v - mean;
-                    const diff2 = diff * diff;
-                    variance += diff2;
-                    m4 += diff2 * diff2;
-                }
-            }
-            const std = Math.sqrt(variance / values.length);
-            const kurtosis = std > 0 ? (m4 / values.length) / (variance / values.length * (variance / values.length)) : 0;
-            results.push({ counts, min, max, mean, std, kurtosis, total: values.length });
-        }
-        this[key] = results;
-        return this[key];
     }
 };
 
