@@ -48,6 +48,12 @@ desktop.Host = class {
         electron.ipcRenderer.on('open', (sender, data) => {
             this._open(data);
         });
+        electron.ipcRenderer.on('run-activation', async (sender, data) => {
+            await this._runActivation(data.paths);
+        });
+        electron.ipcRenderer.on('run-activation-random', async () => {
+            await this._runActivation(null);
+        });
         this._element('menu-button').style.opacity = 0;
         if (!/^\d+\.\d+\.\d+$/.test(this.version)) {
             throw new Error('Invalid version.');
@@ -489,9 +495,11 @@ desktop.Host = class {
                     this._view.show(null);
                     const options = { ...this._view.options };
                     if (model) {
+                        this._modelPath = path;
                         options.path = path;
                         this._title(location.label);
                     } else {
+                        this._modelPath = null;
                         options.path = path;
                         this._title('');
                     }
@@ -505,6 +513,190 @@ desktop.Host = class {
                 }
                 this.update(options);
             }
+        }
+    }
+
+    async _runActivation(npyPaths) {
+        if (!this._modelPath) {
+            this._view.error(new Error('No model is currently open. Open an ONNX model first.'), false);
+            return;
+        }
+        this._view.show('welcome spinner');
+        const npyPath = npyPaths ? npyPaths[0] : null;
+        const modelPath = this._modelPath;
+        const script = [
+            'import onnx, onnxruntime, numpy as np, json, sys',
+            'model_path = sys.argv[1]',
+            'npy_path = sys.argv[2] if len(sys.argv) > 2 else None',
+            'model = onnx.load(model_path)',
+            'from onnx import ValueInfoProto, TensorProto',
+            'existing = set(o.name for o in model.graph.output)',
+            'for node in model.graph.node:',
+            '    for output in node.output:',
+            '        if output and output not in existing:',
+            '            vi = ValueInfoProto()',
+            '            vi.name = output',
+            '            model.graph.output.append(vi)',
+            'session = onnxruntime.InferenceSession(model.SerializeToString())',
+            'feed = {}',
+            'if npy_path:',
+            '    input_data = np.load(npy_path, allow_pickle=False)',
+            '    if input_data.dtype != np.float32:',
+            '        input_data = input_data.astype(np.float32)',
+            '    feed[session.get_inputs()[0].name] = input_data',
+            'else:',
+            '    dtype_map = {1: np.float32, 2: np.uint8, 3: np.int8, 5: np.int16, 6: np.int32, 7: np.int64, 10: np.float16, 11: np.float64}',
+            '    for inp in session.get_inputs():',
+            '        shape = [d if isinstance(d, int) else 1 for d in inp.shape]',
+            '        dtype = dtype_map.get(inp.type.replace("tensor(", "").replace(")", ""), np.float32) if isinstance(inp.type, str) else np.float32',
+            '        if "float" in str(inp.type): dtype = np.float32',
+            '        elif "int64" in str(inp.type): dtype = np.int64',
+            '        elif "int32" in str(inp.type): dtype = np.int32',
+            '        feed[inp.name] = np.random.randn(*shape).astype(dtype) if np.issubdtype(dtype, np.floating) else np.ones(shape, dtype=dtype)',
+            'results = session.run(None, feed)',
+            'output_names = [o.name for o in session.get_outputs()]',
+            'activations = {}',
+            'for name, data in zip(output_names, results):',
+            '    flat = data.flatten().astype(np.float64)',
+            '    if len(flat) > 0 and np.issubdtype(data.dtype, np.floating):',
+            '        counts, edges = np.histogram(flat, bins=64)',
+            '        mean_val = float(np.mean(flat))',
+            '        std_val = float(np.std(flat))',
+            '        kurt = float(np.mean(((flat - mean_val) / std_val) ** 4) - 3.0) if std_val > 0 else 0.0',
+            '        channels = {}',
+            '        if data.ndim >= 2:',
+            '            for ax in range(min(data.ndim, 4)):',
+            '                n_ch = data.shape[ax]',
+            '                if n_ch < 1 or n_ch > 2048: continue',
+            '                ch_list = []',
+            '                for c in range(n_ch):',
+            '                    sl = [slice(None)] * data.ndim',
+            '                    sl[ax] = c',
+            '                    ch_flat = data[tuple(sl)].flatten().astype(np.float64)',
+            '                    if len(ch_flat) == 0: continue',
+            '                    ch_counts, _ = np.histogram(ch_flat, bins=32)',
+            '                    ch_mean = float(np.mean(ch_flat))',
+            '                    ch_std = float(np.std(ch_flat))',
+            '                    ch_kurt = float(np.mean(((ch_flat - ch_mean) / ch_std) ** 4) - 3.0) if ch_std > 0 else 0.0',
+            '                    ch_list.append({"min": float(np.min(ch_flat)), "max": float(np.max(ch_flat)), "mean": ch_mean, "std": ch_std, "kurtosis": ch_kurt, "counts": ch_counts.tolist(), "total": int(len(ch_flat))})',
+            '                if ch_list: channels[str(ax)] = ch_list',
+            '        activations[name] = {',
+            '            "min": float(np.min(flat)),',
+            '            "max": float(np.max(flat)),',
+            '            "mean": mean_val,',
+            '            "std": std_val,',
+            '            "kurtosis": kurt,',
+            '            "total": int(len(flat)),',
+            '            "counts": counts.tolist(),',
+            '            "edges": edges.tolist(),',
+            '            "shape": list(data.shape),',
+            '            "channels": channels',
+            '        }',
+            'import tempfile, os',
+            'temp_dir = os.path.join(tempfile.gettempdir(), "netron_activations")',
+            'os.makedirs(temp_dir, exist_ok=True)',
+            'raw = {}',
+            'for name, data in zip(output_names, results):',
+            '    if np.issubdtype(data.dtype, np.floating):',
+            '        raw[name] = data',
+            'np.savez(os.path.join(temp_dir, "raw.npz"), **raw)',
+            'result = {"activations": activations, "temp_dir": temp_dir}',
+            'print(json.dumps(result))'
+        ].join('\n');
+        try {
+            const result = await new Promise((resolve, reject) => {
+                const env = Object.assign({}, process.env);
+                env.PATH = `/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:${env.PATH || ''}`;
+                const args = ['-c', script, modelPath];
+                if (npyPath) args.push(npyPath);
+                child_process.execFile('python3', args, {
+                    maxBuffer: 100 * 1024 * 1024,
+                    env
+                }, (error, stdout, stderr) => {
+                    if (error) {
+                        if (error.code === 'ENOENT') {
+                            reject(new Error('python3 is not installed or not in PATH. Install Python 3 and onnxruntime to use activation analysis.'));
+                        } else {
+                            reject(new Error(stderr || error.message));
+                        }
+                    } else {
+                        resolve(stdout);
+                    }
+                });
+            });
+            const parsed = JSON.parse(result);
+            this._view.activations = new Map(Object.entries(parsed.activations));
+            this._activationTempDir = parsed.temp_dir;
+            this._view.show(null);
+        } catch (error) {
+            this._view.show(null);
+            this._view.error(error, false);
+        }
+    }
+
+    async _runActivationChannel(tensorName, axes) {
+        const tempDir = this._activationTempDir;
+        if (!tempDir) return null;
+        const script = [
+            'import numpy as np, json, sys, os',
+            'temp_dir = sys.argv[1]',
+            'tensor_name = sys.argv[2]',
+            'axes = [int(x) for x in sys.argv[3].split(",")]',
+            'data_file = os.path.join(temp_dir, "raw.npz")',
+            'raw = np.load(data_file, allow_pickle=False)',
+            'if tensor_name not in raw:',
+            '    print(json.dumps(None))',
+            '    sys.exit(0)',
+            'data = raw[tensor_name]',
+            'dims = list(data.shape)',
+            'num_groups = 1',
+            'for a in axes: num_groups *= dims[a]',
+            'strides = [1] * len(dims)',
+            'for i in range(len(dims)-2, -1, -1): strides[i] = strides[i+1] * dims[i+1]',
+            'axis_dims = [dims[a] for a in sorted(axes)]',
+            'axis_strides = [1] * len(axes)',
+            'for i in range(len(axes)-2, -1, -1): axis_strides[i] = axis_strides[i+1] * axis_dims[i+1]',
+            'sorted_axes = sorted(axes)',
+            'flat = data.flatten().astype(np.float64)',
+            'groups = [[] for _ in range(num_groups)]',
+            'for i in range(len(flat)):',
+            '    gidx = 0',
+            '    rem = i',
+            '    for ai, a in enumerate(sorted_axes):',
+            '        dim_idx = (rem // strides[a]) % dims[a]',
+            '        gidx += dim_idx * axis_strides[ai]',
+            '    groups[gidx].append(flat[i])',
+            'results = []',
+            'for g in groups:',
+            '    v = np.array(g)',
+            '    if len(v) == 0:',
+            '        results.append({"counts":[0]*32,"min":0,"max":0,"mean":0,"std":0,"kurtosis":0,"total":0})',
+            '        continue',
+            '    counts, _ = np.histogram(v, bins=32)',
+            '    mn = float(np.mean(v))',
+            '    sd = float(np.std(v))',
+            '    kt = float(np.mean(((v-mn)/sd)**4)-3.0) if sd>0 else 0.0',
+            '    results.append({"counts":counts.tolist(),"min":float(np.min(v)),"max":float(np.max(v)),"mean":mn,"std":sd,"kurtosis":kt,"total":int(len(v))})',
+            'print(json.dumps(results))'
+        ].join('\n');
+        try {
+            const result = await new Promise((resolve, reject) => {
+                const env = Object.assign({}, process.env);
+                env.PATH = `/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:${env.PATH || ''}`;
+                child_process.execFile('python3', ['-c', script, tempDir, tensorName, axes.join(',')], {
+                    maxBuffer: 100 * 1024 * 1024,
+                    env
+                }, (error, stdout, stderr) => {
+                    if (error) {
+                        reject(new Error(stderr || error.message));
+                    } else {
+                        resolve(stdout);
+                    }
+                });
+            });
+            return JSON.parse(result);
+        } catch {
+            return null;
         }
     }
 

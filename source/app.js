@@ -228,8 +228,13 @@ app.Application = class {
 
     _dropPaths(sender, paths) {
         const window = sender.getOwnerBrowserWindow();
+        const npyPaths = paths.filter((p) => p.endsWith('.npy'));
+        const modelPaths = paths.filter((p) => !p.endsWith('.npy'));
+        if (npyPaths.length > 0) {
+            sender.send('run-activation', { paths: npyPaths });
+        }
         let view = this._views.get(window);
-        for (const path of paths) {
+        for (const path of modelPaths) {
             if (view) {
                 view.open(path);
                 view = null;
@@ -411,6 +416,18 @@ app.Application = class {
                     label: '&Export...',
                     accelerator: 'CmdOrCtrl+Shift+E',
                     click: async () => await this.execute('export', null)
+                },
+                { type: 'separator' },
+                {
+                    id: 'file.activation',
+                    label: 'Analyze &Activations (Random Input)',
+                    accelerator: 'CmdOrCtrl+Shift+A',
+                    click: () => {
+                        const view = this._views.activeView;
+                        if (view && view.window) {
+                            view.window.webContents.send('run-activation-random');
+                        }
+                    }
                 },
                 { type: 'separator' },
                 { role: 'close' },
