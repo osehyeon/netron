@@ -54,6 +54,20 @@ desktop.Host = class {
         electron.ipcRenderer.on('run-activation-random', async () => {
             await this._runActivation(null);
         });
+        try {
+            const shell = process.env.SHELL || '/bin/zsh';
+            this._pythonPath = child_process.execSync(`${shell} -l -c "which python3"`, { timeout: 5000 }).toString().trim();
+        } catch {
+            this._pythonPath = 'python3';
+        }
+        this._pythonEnv = Object.assign({}, process.env);
+        try {
+            const shell = process.env.SHELL || '/bin/zsh';
+            const envPath = child_process.execSync(`${shell} -l -c "echo \\$PATH"`, { timeout: 5000 }).toString().trim();
+            this._pythonEnv.PATH = envPath;
+        } catch {
+            // keep default env
+        }
         this._element('menu-button').style.opacity = 0;
         if (!/^\d+\.\d+\.\d+$/.test(this.version)) {
             throw new Error('Invalid version.');
@@ -617,13 +631,11 @@ desktop.Host = class {
         ].join('\n');
         try {
             const result = await new Promise((resolve, reject) => {
-                const env = Object.assign({}, process.env);
-                env.PATH = `/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:${env.PATH || ''}`;
                 const args = ['-c', script, modelPath];
                 if (npyPath) args.push(npyPath);
-                child_process.execFile('python3', args, {
+                child_process.execFile(this._pythonPath, args, {
                     maxBuffer: 100 * 1024 * 1024,
-                    env
+                    env: this._pythonEnv
                 }, (error, stdout, stderr) => {
                     if (error) {
                         if (error.code === 'ENOENT') {
@@ -698,11 +710,9 @@ desktop.Host = class {
         ].join('\n');
         try {
             const result = await new Promise((resolve, reject) => {
-                const env = Object.assign({}, process.env);
-                env.PATH = `/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:${env.PATH || ''}`;
-                child_process.execFile('python3', ['-c', script, tempDir, tensorName, axes.join(',')], {
+                child_process.execFile(this._pythonPath, ['-c', script, tempDir, tensorName, axes.join(',')], {
                     maxBuffer: 100 * 1024 * 1024,
-                    env
+                    env: this._pythonEnv
                 }, (error, stdout, stderr) => {
                     if (error) {
                         reject(new Error(stderr || error.message));
