@@ -539,7 +539,19 @@ desktop.Host = class {
             '            model.graph.output.append(vi)',
             'session = onnxruntime.InferenceSession(model.SerializeToString())',
             'feed = {}',
-            'if npy_path:',
+            'num_inputs = len(session.get_inputs())',
+            'if npy_path and npy_path.endswith(".npz"):',
+            '    data = np.load(npy_path, allow_pickle=False)',
+            '    for inp in session.get_inputs():',
+            '        if inp.name in data:',
+            '            arr = data[inp.name]',
+            '            if arr.dtype != np.float32 and np.issubdtype(arr.dtype, np.floating): arr = arr.astype(np.float32)',
+            '            feed[inp.name] = arr',
+            '        else:',
+            '            import sys; print(json.dumps({"error": "npz missing key: " + inp.name + ". Available: " + str(data.files)})); sys.exit(0)',
+            'elif npy_path and npy_path.endswith(".npy"):',
+            '    if num_inputs > 1:',
+            '        import sys; print(json.dumps({"error": "Model has " + str(num_inputs) + " inputs. Use .npz file with keys: " + ", ".join([i.name for i in session.get_inputs()])})); sys.exit(0)',
             '    input_data = np.load(npy_path, allow_pickle=False)',
             '    if input_data.dtype != np.float32:',
             '        input_data = input_data.astype(np.float32)',
@@ -625,6 +637,11 @@ desktop.Host = class {
                 });
             });
             const parsed = JSON.parse(result);
+            if (parsed.error) {
+                this._view.show(null);
+                this._view.error(new Error(parsed.error), false);
+                return;
+            }
             this._view.activations = new Map(Object.entries(parsed.activations));
             this._activationTempDir = parsed.temp_dir;
             this._view.show(null);

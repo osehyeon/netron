@@ -228,10 +228,10 @@ app.Application = class {
 
     _dropPaths(sender, paths) {
         const window = sender.getOwnerBrowserWindow();
-        const npyPaths = paths.filter((p) => p.endsWith('.npy'));
-        const modelPaths = paths.filter((p) => !p.endsWith('.npy'));
-        if (npyPaths.length > 0) {
-            sender.send('run-activation', { paths: npyPaths });
+        const activationPaths = paths.filter((p) => p.endsWith('.npy') || p.endsWith('.npz'));
+        const modelPaths = paths.filter((p) => !p.endsWith('.npy') && !p.endsWith('.npz'));
+        if (activationPaths.length > 0) {
+            sender.send('run-activation', { paths: activationPaths });
         }
         let view = this._views.get(window);
         for (const path of modelPaths) {
